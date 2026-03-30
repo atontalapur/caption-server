@@ -1,6 +1,6 @@
 """
 Caption Server — entry point.
-Starts a FastAPI app on PORT (default 8472).
+Default port: 7860 (Hugging Face Spaces standard).
 """
 
 import os
@@ -10,59 +10,64 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import captions, health
-from app.services.style_loader import build_style_context, load_writings
+from app.routes import captions, health, train
+from app.services.style_loader import load_style
 
 load_dotenv()
 
-PORT = int(os.getenv("PORT", "8472"))
-WRITINGS_DIR = os.getenv("WRITINGS_DIR", "data/writings")
+PORT = int(os.getenv("PORT", "7860"))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load writing samples once on startup
-    samples = load_writings(WRITINGS_DIR)
-    app.state.style_context = build_style_context(samples)
+    # Restore any previously saved training data
+    samples, style_context = load_style()
+
+    app.state.style_context = style_context
     app.state.style_samples_count = len(samples)
+    app.state.trained = len(samples) > 0
     app.state.port = PORT
 
-    loaded = len(samples)
-    if loaded:
-        print(f"[caption-server] Loaded {loaded} writing sample(s) for style priming.")
+    if app.state.trained:
+        print(
+            f"[caption-server] Restored {len(samples)} writing sample(s) from cache. "
+            "Ready to caption images."
+        )
     else:
         print(
-            "[caption-server] No writing samples found in "
-            f"'{WRITINGS_DIR}' — captions will use a default style. "
-            "Drop .txt / .md files there and restart to enable style priming."
+            "[caption-server] No training data found. "
+            "Call POST /train with your writing samples before sending images."
         )
 
-    yield  # server runs here
+    yield
 
 
 app = FastAPI(
     title="Caption Server",
-    description="Generates 5 photo captions in the user's personal writing style via Claude.",
-    version="1.0.0",
+    description=(
+        "Generates 5 photo captions in your personal writing style via Claude vision.\n\n"
+        "**Workflow:**\n"
+        "1. `POST /train` — upload your writing samples (one-time setup).\n"
+        "2. `POST /captions` — send any photo, receive 5 captions."
+    ),
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# Allow Next.js dev (localhost:3000) and any production origin.
-# Tighten ALLOW_ORIGINS in production via env var.
-ALLOW_ORIGINS = os.getenv("ALLOW_ORIGINS", "http://localhost:3000").split(",")
-
+# Open CORS so any application (Next.js, mobile, scripts, etc.) can call this API.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
+    allow_origins=["*"],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 app.include_router(health.router)
+app.include_router(train.router)
 app.include_router(captions.router)
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=PORT, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=PORT, reload=False)

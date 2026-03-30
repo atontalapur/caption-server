@@ -1,5 +1,5 @@
 """
-GET /health — liveness check, useful for Next.js to verify the server is up.
+GET /health — liveness + training status check.
 """
 
 from fastapi import APIRouter, Request
@@ -12,6 +12,7 @@ router = APIRouter(tags=["health"])
 async def health(request: Request):
     return HealthResponse(
         status="ok",
-        writings_loaded=request.app.state.style_samples_count,
+        trained=request.app.state.trained,
+        files_loaded=request.app.state.style_samples_count,
         port=request.app.state.port,
     )
