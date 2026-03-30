@@ -1,53 +1,53 @@
 # Integrating the Caption Server with Next.js
 
-The server runs on **port `8472`** (non-standard, safe to keep open alongside your Next.js dev server on 3000).
+The server runs on **port `7860`** locally and is available at
+`https://<your-hf-username>-caption-server.hf.space` when deployed to Hugging Face Spaces.
 
 ---
 
-## 1. Start the caption server
+## 1. One-time training call
+
+Before any image can be captioned, send your writing samples to `/train`.
+Do this once from a script, terminal, or an admin route — not on every page load.
 
 ```bash
-# From the caption-server root
-python -m app.main
+# From your terminal — send every file in your writings folder
+curl -X POST http://localhost:7860/train \
+  $(find /path/to/writings -type f \( -name "*.txt" -o -name "*.md" \) \
+    | xargs -I{} echo "-F files=@{}")
 ```
 
-You should see:
-```
-INFO:     Uvicorn running on http://0.0.0.0:8472 (Press CTRL+C to quit)
-```
-
----
-
-## 2. Verify it's alive
-
-```bash
-curl http://localhost:8472/health
-# {"status":"ok","writings_loaded":3,"port":8472}
+Response:
+```json
+{
+  "status": "ready",
+  "files_accepted": 4,
+  "message": "Training data accepted (4 file(s)). The server is now ready to generate captions."
+}
 ```
 
 ---
 
-## 3. Environment variable in Next.js
-
-Add this to your Next.js project's `.env.local`:
+## 2. Environment variable in Next.js
 
 ```env
-CAPTION_SERVER_URL=http://localhost:8472
+# .env.local
+CAPTION_SERVER_URL=http://localhost:7860
+# Production:
+# CAPTION_SERVER_URL=https://your-hf-username-caption-server.hf.space
 ```
-
-For production, point this at wherever you host the Python server (e.g. a Railway / Fly.io URL).
 
 ---
 
-## 4. A) Server-side Route Handler (recommended)
+## 3. Server-side Route Handler (recommended)
 
-Keeps the Python server private — your Next.js app proxies the request.
+Keeps your Python server private — Next.js proxies the request.
 
 ```ts
 // app/api/captions/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-const CAPTION_SERVER = process.env.CAPTION_SERVER_URL ?? "http://localhost:8472";
+const CAPTION_SERVER = process.env.CAPTION_SERVER_URL ?? "http://localhost:7860";
 
 export async function POST(req: NextRequest) {
   const formData = await req.formData();
@@ -57,7 +57,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No image provided" }, { status: 400 });
   }
 
-  // Forward the file to the caption server
   const upstream = new FormData();
   upstream.append("image", image, image.name);
 
@@ -71,37 +70,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: detail }, { status: res.status });
   }
 
-  const data = await res.json();
-  // data = { captions: string[5], style_samples_loaded: number }
-  return NextResponse.json(data);
+  return NextResponse.json(await res.json());
 }
 ```
 
 ---
 
-## 5. B) Client-side (direct call — only if server is public)
-
-If you expose the Python server publicly with CORS set to your domain:
-
-```ts
-async function getCaptions(file: File): Promise<string[]> {
-  const form = new FormData();
-  form.append("image", file);
-
-  const res = await fetch("http://localhost:8472/captions", {
-    method: "POST",
-    body: form,
-  });
-
-  if (!res.ok) throw new Error(`Caption server error: ${res.status}`);
-  const data = await res.json();
-  return data.captions; // string[]
-}
-```
-
----
-
-## 6. React component example
+## 4. React component
 
 ```tsx
 "use client";
@@ -111,12 +86,14 @@ import { useState } from "react";
 export default function CaptionUploader() {
   const [captions, setCaptions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setLoading(true);
+    setError(null);
     setCaptions([]);
 
     const form = new FormData();
@@ -125,7 +102,11 @@ export default function CaptionUploader() {
     const res = await fetch("/api/captions", { method: "POST", body: form });
     const data = await res.json();
 
-    setCaptions(data.captions ?? []);
+    if (!res.ok) {
+      setError(data.error ?? "Something went wrong.");
+    } else {
+      setCaptions(data.captions ?? []);
+    }
     setLoading(false);
   }
 
@@ -133,11 +114,10 @@ export default function CaptionUploader() {
     <div>
       <input type="file" accept="image/*" onChange={handleUpload} />
       {loading && <p>Generating captions…</p>}
+      {error && <p style={{ color: "red" }}>{error}</p>}
       {captions.length > 0 && (
         <ol>
-          {captions.map((c, i) => (
-            <li key={i}>{c}</li>
-          ))}
+          {captions.map((c, i) => <li key={i}>{c}</li>)}
         </ol>
       )}
     </div>
@@ -147,7 +127,7 @@ export default function CaptionUploader() {
 
 ---
 
-## 7. TypeScript types
+## 5. TypeScript types
 
 ```ts
 // types/captions.ts
@@ -155,21 +135,40 @@ export interface CaptionResponse {
   captions: [string, string, string, string, string];
   style_samples_loaded: number;
 }
+
+export interface TrainResponse {
+  status: "ready";
+  files_accepted: number;
+  message: string;
+}
+
+export interface HealthResponse {
+  status: "ok";
+  trained: boolean;
+  files_loaded: number;
+  port: number;
+}
 ```
 
 ---
 
-## 8. Adding your writing style
+## 6. Check training status from Next.js
 
-Drop `.txt`, `.md`, or `.mdx` files into `caption-server/data/writings/` and restart the server. The more samples you add, the stronger the style priming. No redeployment of Next.js needed.
+```ts
+const res = await fetch(`${process.env.CAPTION_SERVER_URL}/health`);
+const { trained } = await res.json();
+// trained === false → call /train first
+```
 
 ---
 
-## 9. API reference
+## 7. API reference
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| `GET` | `/health` | — | `{ status, writings_loaded, port }` |
-| `POST` | `/captions` | `multipart/form-data` with `image` field | `{ captions: string[5], style_samples_loaded: number }` |
+| `GET`  | `/health`   | — | `{ status, trained, files_loaded, port }` |
+| `POST` | `/train`    | `multipart/form-data` — field `files` (repeat per file) | `{ status, files_accepted, message }` |
+| `POST` | `/captions` | `multipart/form-data` — field `image` | `{ captions: string[5], style_samples_loaded }` |
 
-**Supported image types:** JPEG, PNG, GIF, WebP (max 20 MB)
+Supported image types: JPEG, PNG, GIF, WebP (max 20 MB).
+`/captions` returns `503` if `/train` has not been called yet.

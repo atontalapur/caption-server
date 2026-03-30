@@ -1,47 +1,33 @@
+---
+title: Caption Server
+emoji: 📸
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
 # Caption Server
 
-A local Python server that generates **5 photo captions written in your personal style** using Claude's vision API.
+Generates **5 photo captions written in your personal style** using Claude's vision API.
 
-Drop your own writing samples in → the server learns your voice → every caption it writes sounds like you.
+Upload your writing once → the server learns your voice → every caption it generates sounds like you.
 
----
-
-## Stack
-
-| Layer | Tech |
-|-------|------|
-| Server | FastAPI + Uvicorn |
-| AI | Anthropic Claude (vision) |
-| Style priming | `.txt` / `.md` / `.mdx` files you provide |
-| Port | `8472` |
+Deployable on **Hugging Face Spaces** (Docker SDK) or run locally.
 
 ---
 
-## Quick start
+## Workflow
 
-```bash
-# 1. Clone and enter
-cd caption-server
-
-# 2. Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Configure
-cp .env.example .env
-# Edit .env and set your ANTHROPIC_API_KEY
-
-# 5. Add your writing (optional but recommended)
-#    Drop .txt / .md files into data/writings/
-
-# 6. Start
-python -m app.main
 ```
-
-Server starts at `http://localhost:8472`.
+1.  POST /train    ← send your writing samples once
+        ↓
+    200 OK — "ready to accept images"
+        ↓
+2.  POST /captions ← send any photo from any app
+        ↓
+    5 captions in your style
+```
 
 ---
 
@@ -49,18 +35,45 @@ Server starts at `http://localhost:8472`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/health` | Liveness check |
-| `POST` | `/captions` | Upload image → get 5 captions |
+| `GET`  | `/health`   | Liveness + training status |
+| `POST` | `/train`    | Upload writing samples (one-time setup) |
+| `POST` | `/captions` | Upload a photo → 5 captions |
 
-**POST /captions** — `multipart/form-data`, field name `image`
-Supported formats: JPEG, PNG, GIF, WebP (max 20 MB)
+---
+
+### `POST /train`
+
+Send all files from your writings directory as a `multipart/form-data` request.
+Accepted extensions: `.txt`, `.md`, `.mdx`. Other files are ignored.
 
 ```bash
-curl -X POST http://localhost:8472/captions \
-  -F "image=@/path/to/photo.jpg"
+curl -X POST https://your-space.hf.space/train \
+  -F "files=@journal_entry.txt" \
+  -F "files=@blog_post.md" \
+  -F "files=@notes.txt"
 ```
 
-Response:
+**Response `200 OK`**
+```json
+{
+  "status": "ready",
+  "files_accepted": 3,
+  "message": "Training data accepted (3 file(s)). The server is now ready to generate captions."
+}
+```
+
+---
+
+### `POST /captions`
+
+Send one image file. Supported: JPEG, PNG, GIF, WebP (max 20 MB).
+
+```bash
+curl -X POST https://your-space.hf.space/captions \
+  -F "image=@photo.jpg"
+```
+
+**Response `200 OK`**
 ```json
 {
   "captions": [
@@ -74,19 +87,42 @@ Response:
 }
 ```
 
----
-
-## Style priming
-
-Place any `.txt`, `.md`, or `.mdx` files in `data/writings/` before starting the server.
-The contents are read once on startup and injected into every Claude prompt as a style reference.
-Restart the server after adding new samples.
+Returns `503` if `/train` has not been called yet.
 
 ---
 
-## Next.js integration
+### `GET /health`
 
-See [`docs/NEXTJS_INTEGRATION.md`](docs/NEXTJS_INTEGRATION.md) for a full guide including a proxy route handler, client hook, and TypeScript types.
+```json
+{
+  "status": "ok",
+  "trained": true,
+  "files_loaded": 3,
+  "port": 7860
+}
+```
+
+---
+
+## Deploy to Hugging Face Spaces
+
+1. **Create a new Space** at huggingface.co → SDK: **Docker**
+2. Push this repo as the Space source (or fork it)
+3. Add your secret in **Settings → Variables and Secrets**:
+   - `ANTHROPIC_API_KEY` → your Anthropic key
+4. Optionally enable **Persistent Storage** so training data survives restarts
+5. The Space builds and starts — your API is live at `https://your-username-caption-server.hf.space`
+
+---
+
+## Run locally
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # add ANTHROPIC_API_KEY
+python -m app.main            # → http://localhost:7860
+```
 
 ---
 
@@ -95,20 +131,27 @@ See [`docs/NEXTJS_INTEGRATION.md`](docs/NEXTJS_INTEGRATION.md) for a full guide 
 ```
 caption-server/
 ├── app/
-│   ├── main.py               # FastAPI app + lifespan
+│   ├── main.py                  # FastAPI app + lifespan
 │   ├── routes/
-│   │   ├── captions.py       # POST /captions
-│   │   └── health.py         # GET /health
+│   │   ├── train.py             # POST /train
+│   │   ├── captions.py          # POST /captions
+│   │   └── health.py            # GET  /health
 │   ├── services/
-│   │   ├── claude_client.py  # Claude API integration
-│   │   └── style_loader.py   # Reads writing samples
+│   │   ├── claude_client.py     # Claude vision API
+│   │   └── style_loader.py      # File parsing + persistence
 │   └── models/
-│       └── schemas.py        # Pydantic response models
-├── data/
-│   └── writings/             # Your writing samples (git-ignored)
+│       └── schemas.py           # Pydantic types
+├── data/                        # Runtime cache (git-ignored)
 ├── docs/
-│   └── NEXTJS_INTEGRATION.md
-├── .env.example
+│   └── NEXTJS_INTEGRATION.md   # Next.js-specific guide
+├── Dockerfile                   # HF Spaces Docker build
 ├── requirements.txt
-└── README.md
+└── .env.example
 ```
+
+---
+
+## Integration docs
+
+- **Any HTTP client** — use the curl examples above directly.
+- **Next.js** — see [`docs/NEXTJS_INTEGRATION.md`](docs/NEXTJS_INTEGRATION.md).
