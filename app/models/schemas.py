@@ -17,4 +17,3 @@ class HealthResponse(BaseModel):
     status: str          # "ok"
     trained: bool
     files_loaded: int
-    port: int

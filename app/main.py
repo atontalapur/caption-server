@@ -9,7 +9,10 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from app.dependencies import limiter
 from app.routes import captions, health, train
 from app.services.style_loader import load_style
 
@@ -17,16 +20,22 @@ load_dotenv()
 
 PORT = int(os.getenv("PORT", "7860"))
 
+# Comma-separated list of allowed origins, e.g. "https://myapp.com,https://other.com".
+# Defaults to "*" so local / HF Spaces usage works out of the box, but should be
+# restricted in production.
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS: list[str] = (
+    [o.strip() for o in _raw_origins.split(",") if o.strip()] or ["*"]
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Restore any previously saved training data
     samples, style_context = load_style()
 
     app.state.style_context = style_context
     app.state.style_samples_count = len(samples)
     app.state.trained = len(samples) > 0
-    app.state.port = PORT
 
     if app.state.trained:
         print(
@@ -37,6 +46,12 @@ async def lifespan(app: FastAPI):
         print(
             "[caption-server] No training data found. "
             "Call POST /train with your writing samples before sending images."
+        )
+
+    if not os.getenv("TRAIN_API_KEY"):
+        print(
+            "[caption-server] WARNING: TRAIN_API_KEY is not set. "
+            "POST /train is open to any caller — set this env var in production."
         )
 
     yield
@@ -54,10 +69,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Open CORS so any application (Next.js, mobile, scripts, etc.) can call this API.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

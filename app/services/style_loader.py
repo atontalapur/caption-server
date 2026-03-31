@@ -9,8 +9,25 @@ from pathlib import Path
 from typing import List, Tuple
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".mdx"}
-CACHE_PATH = Path(os.getenv("STYLE_CACHE_PATH", "data/style_cache.json"))
 MAX_STYLE_CHARS = 6000
+
+# Resolve cache path and ensure it stays within the working directory.
+_cwd = Path.cwd().resolve()
+_configured = os.getenv("STYLE_CACHE_PATH", "")
+if _configured:
+    _candidate = Path(_configured).resolve()
+    if str(_candidate).startswith(str(_cwd)):
+        CACHE_PATH = _candidate
+    else:
+        import warnings
+        warnings.warn(
+            f"STYLE_CACHE_PATH '{_configured}' escapes the working directory; "
+            "using default 'data/style_cache.json'.",
+            stacklevel=1,
+        )
+        CACHE_PATH = _cwd / "data" / "style_cache.json"
+else:
+    CACHE_PATH = _cwd / "data" / "style_cache.json"
 
 
 # ---------------------------------------------------------------------------
@@ -46,8 +63,8 @@ def extract_text_from_uploads(
             text = content.decode("utf-8").strip()
             if text:
                 samples.append(text)
-        except (UnicodeDecodeError, Exception):
-            pass  # skip unreadable files
+        except UnicodeDecodeError:
+            pass  # skip files that aren't valid UTF-8
     return samples, len(samples)
 
 
@@ -68,7 +85,7 @@ def load_style() -> Tuple[List[str], str]:
     """
     Load persisted samples from disk.
 
-    Returns (samples, style_context).  Both are empty if no cache exists yet.
+    Returns (samples, style_context). Both are empty if no cache exists yet.
     """
     if not CACHE_PATH.exists():
         return [], ""

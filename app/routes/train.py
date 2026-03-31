@@ -7,9 +7,11 @@ After this returns 200, the server is ready to caption images.
 Calling /train again replaces the previous training data.
 """
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from typing import List
 
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+
+from app.dependencies import limiter, require_train_key
 from app.models.schemas import TrainResponse
 from app.services.style_loader import (
     build_style_context,
@@ -22,7 +24,8 @@ router = APIRouter(tags=["training"])
 ACCEPTED_EXTENSIONS = {".txt", ".md", ".mdx"}
 
 
-@router.post("/train", response_model=TrainResponse)
+@router.post("/train", response_model=TrainResponse, dependencies=[Depends(require_train_key)])
+@limiter.limit("5/hour")
 async def train_model(
     request: Request,
     files: List[UploadFile] = File(..., description="All files from your writings directory"),
@@ -33,6 +36,7 @@ async def train_model(
     - Send every `.txt`, `.md`, or `.mdx` file from your writings folder.
     - Other file types are silently ignored.
     - Call this once before sending images. Calling again replaces the style.
+    - Requires `Authorization: Bearer <TRAIN_API_KEY>` when `TRAIN_API_KEY` is set.
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files were uploaded.")
@@ -51,7 +55,6 @@ async def train_model(
             ),
         )
 
-    # Persist to disk and update live app state
     save_style(samples)
     request.app.state.style_context = build_style_context(samples)
     request.app.state.style_samples_count = accepted
