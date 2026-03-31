@@ -4,10 +4,17 @@ using the user's personal writing style as context.
 """
 
 import base64
+import html
 import json
-import re
+import logging
+import os
 import anthropic
-from typing import List
+
+log = logging.getLogger(__name__)
+
+# Model is configurable so it can be updated without code changes.
+# Default: claude-opus-4-6 (latest Opus as of 2026-03).
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-4-6")
 
 _MAX_RAW_BYTES = 4096  # generous upper bound for a JSON array of 5 short strings
 
@@ -22,11 +29,12 @@ def get_client() -> anthropic.Anthropic:
 
 
 def _sanitize_style_context(raw: str) -> str:
-    """Strip null bytes and lone XML-closing-tag injections from user-supplied text."""
-    cleaned = raw.replace("\x00", "")
-    # Collapse any attempt to close our XML wrapper early
-    cleaned = re.sub(r"</writing_samples\s*>", "", cleaned, flags=re.IGNORECASE)
-    return cleaned
+    """
+    HTML-escape the style context so that any XML/HTML special characters
+    become inert data inside the <writing_samples> wrapper.
+    Also strips null bytes.
+    """
+    return html.escape(raw.replace("\x00", ""), quote=False)
 
 
 def _build_system_prompt(style_context: str) -> str:
@@ -65,7 +73,7 @@ def generate_captions(
     image_bytes: bytes,
     media_type: str,
     style_context: str,
-) -> List[str]:
+) -> list[str]:
     """
     Send the image + style context to Claude and return 5 captions.
 
@@ -84,8 +92,10 @@ def generate_captions(
     encoded = base64.standard_b64encode(image_bytes).decode("utf-8")
     system_prompt = _build_system_prompt(style_context)
 
+    log.info("Requesting captions from Claude model=%s image_bytes=%d", CLAUDE_MODEL, len(image_bytes))
+
     message = client.messages.create(
-        model="claude-opus-4-5",
+        model=CLAUDE_MODEL,
         max_tokens=512,
         system=system_prompt,
         messages=[
@@ -112,6 +122,10 @@ def generate_captions(
         ],
     )
 
+    # Validate that Claude returned a text block (not a tool call or other type).
+    if not message.content or message.content[0].type != "text":
+        raise ValueError("Claude returned a non-text response block.")
+
     raw = message.content[0].text.strip()
 
     # Strip markdown code fences if Claude wraps the JSON
@@ -126,11 +140,12 @@ def generate_captions(
         raise ValueError("Claude returned an unexpectedly large response.")
 
     try:
-        captions: List[str] = json.loads(raw)
+        captions: list[str] = json.loads(raw)
     except json.JSONDecodeError:
         raise ValueError("Claude returned an unexpected response format.")
 
     if not isinstance(captions, list) or len(captions) != 5:
         raise ValueError("Claude returned an unexpected response format.")
 
+    log.info("Captions generated successfully count=%d", len(captions))
     return [str(c).strip() for c in captions]

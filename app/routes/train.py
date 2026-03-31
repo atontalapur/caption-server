@@ -7,6 +7,7 @@ After this returns 200, the server is ready to caption images.
 Calling /train again replaces the previous training data.
 """
 
+import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
@@ -19,9 +20,12 @@ from app.services.style_loader import (
     save_style,
 )
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(tags=["training"])
 
 ACCEPTED_EXTENSIONS = {".txt", ".md", ".mdx"}
+MAX_FILE_BYTES = 1 * 1024 * 1024  # 1 MB per file
 
 
 @router.post("/train", response_model=TrainResponse, dependencies=[Depends(require_train_key)])
@@ -34,15 +38,28 @@ async def train_model(
     Upload your writing samples to prime the caption style.
 
     - Send every `.txt`, `.md`, or `.mdx` file from your writings folder.
-    - Other file types are silently ignored.
+    - Files larger than 1 MB or non-text types are rejected/skipped.
     - Call this once before sending images. Calling again replaces the style.
     - Requires `Authorization: Bearer <TRAIN_API_KEY>` when `TRAIN_API_KEY` is set.
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files were uploaded.")
 
-    filenames = [f.filename or "" for f in files]
-    contents = [await f.read() for f in files]
+    filenames: list[str] = []
+    contents: list[bytes] = []
+
+    for f in files:
+        raw = await f.read()
+        if len(raw) > MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File '{f.filename}' exceeds the 1 MB per-file limit "
+                    f"({len(raw) / 1024:.0f} KB)."
+                ),
+            )
+        filenames.append(f.filename or "")
+        contents.append(raw)
 
     samples, accepted = extract_text_from_uploads(filenames, contents)
 
@@ -55,10 +72,18 @@ async def train_model(
             ),
         )
 
-    save_style(samples)
-    request.app.state.style_context = build_style_context(samples)
-    request.app.state.style_samples_count = accepted
-    request.app.state.trained = True
+    # Acquire per-worker lock so concurrent /train calls don't interleave
+    # disk writes or leave app.state in a partially-updated state.
+    async with request.app.state.train_lock:
+        save_style(samples)
+        style_context = build_style_context(samples)
+
+        # Update in-memory state only after all I/O is complete.
+        request.app.state.style_context = style_context
+        request.app.state.style_samples_count = accepted
+        request.app.state.trained = True
+
+    log.info("Training updated: %d file(s) accepted, context_chars=%d", accepted, len(style_context))
 
     return TrainResponse(
         status="ready",

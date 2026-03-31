@@ -2,10 +2,14 @@
 GET /health — liveness + training status check.
 """
 
+import logging
+
 from fastapi import APIRouter, Request
 
 from app.dependencies import limiter
 from app.models.schemas import HealthResponse
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 

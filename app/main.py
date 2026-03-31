@@ -3,6 +3,8 @@ Caption Server — entry point.
 Default port: 7860 (Hugging Face Spaces standard).
 """
 
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -14,9 +16,15 @@ from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import limiter
 from app.routes import captions, health, train
-from app.services.style_loader import load_style
+from app.services.style_loader import check_storage_writable, load_style
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
+log = logging.getLogger(__name__)
 
 PORT = int(os.getenv("PORT", "7860"))
 
@@ -31,27 +39,29 @@ ALLOWED_ORIGINS: list[str] = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Storage writability check — warns early if /app/data is not persistent.
+    check_storage_writable()
+
     samples, style_context = load_style()
 
+    # app.state is used as a warm-start cache only.
+    # Captions routes re-read from disk to stay correct under multi-worker deploys.
     app.state.style_context = style_context
     app.state.style_samples_count = len(samples)
     app.state.trained = len(samples) > 0
 
-    if app.state.trained:
-        print(
-            f"[caption-server] Restored {len(samples)} writing sample(s) from cache. "
-            "Ready to caption images."
-        )
-    else:
-        print(
-            "[caption-server] No training data found. "
-            "Call POST /train with your writing samples before sending images."
-        )
+    # Mutex for concurrent /train requests (per-worker).
+    app.state.train_lock = asyncio.Lock()
 
-    if not os.getenv("TRAIN_API_KEY"):
-        print(
-            "[caption-server] WARNING: TRAIN_API_KEY is not set. "
-            "POST /train is open to any caller — set this env var in production."
+    if app.state.trained:
+        log.info("Restored %d writing sample(s) from cache. Ready to caption images.", len(samples))
+    else:
+        log.info("No training data found. Call POST /train with writing samples before sending images.")
+
+    if not os.getenv("TRAIN_API_KEY", "").strip():
+        log.warning(
+            "TRAIN_API_KEY is not set. POST /train is open to any caller — "
+            "set this env var in production."
         )
 
     yield
@@ -69,6 +79,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# limiter must be assigned to app.state before include_router calls so that
+# slowapi can find it when decorating route handlers.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
